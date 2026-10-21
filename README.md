@@ -1,6 +1,7 @@
-<p align="center">
-  <img src="assets/repo_images/openwam_title.png" alt="OpenWAM" width="60%">
-</p>
+# OpenWAM
+
+This cleaned copy is maintained by [Wanch9](https://github.com/Wanch9).
+It is based on [OpenWAM-Official/OpenWAM](https://github.com/OpenWAM-Official/OpenWAM); the original license and attribution are retained.
 
 <p align="center"><strong>An Open, Modular Exploration Towards Systematic World–Action Model Pretraining</strong></p>
 
@@ -10,10 +11,6 @@
   <a href="https://huggingface.co/OpenWAM"><img src="https://img.shields.io/badge/HuggingFace-Model%20%26%20Data-orange?style=flat&amp;logo=huggingface" alt="Model &amp; Data on Hugging Face"></a>
 </p>
 
-<p align="center">
-  <img src="assets/repo_images/teaser.jpg" alt="OpenWAM teaser">
-</p>
-
 ## What is OpenWAM
 
 OpenWAM is an open research stack for systematically developing **World-Action Models (WAMs)**. It turns tightly coupled design choices into modular components and controlled experiments. It consists of:
@@ -21,10 +18,6 @@ OpenWAM is an open research stack for systematically developing **World-Action M
 - **OpenWAM-Infra:** A modular infrastructure for composing and comparing model, representation, training, inference, deployment, and evaluation choices.
 - **OpenWAM-Study:** Controlled studies that derive practical principles for inheriting world knowledge, coupling world and action learning, and scaling across domains.
 - **OpenWAM-α:** An open pretrained WAM that applies these principles at scale, trained on 518.5M frames (about 6,400 hours) of egocentric human and robot data.
-
-<p align="center">
-  <img src="assets/repo_images/infra.jpg" alt="OpenWAM infrastructure overview">
-</p>
 
 <!--
 ## Repository Layout
@@ -421,18 +414,6 @@ in the benchmarks directory.
 
 If you build on OpenWAM, feel free to open a PR to add your project here.
 
-## Star History
-
-<p align="center">
-  <a href="https://star-history.com/#OpenWAM-Official/OpenWAM&Date">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=OpenWAM-Official/OpenWAM&amp;type=Date&amp;theme=dark">
-      <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=OpenWAM-Official/OpenWAM&amp;type=Date">
-      <img src="https://api.star-history.com/svg?repos=OpenWAM-Official/OpenWAM&amp;type=Date" alt="Star history of OpenWAM-Official/OpenWAM" width="70%">
-    </picture>
-  </a>
-</p>
-
 ## License
 
 OpenWAM is released under the [Apache License 2.0](LICENSE).
@@ -449,26 +430,3 @@ If you use OpenWAM, please cite:
   journal = {arXiv preprint arXiv: 2609.07398}
 }
 ```
-
-## Contact
-
-Have a question, want to share results, or just follow development? Join us:
-
-<table align="center">
-  <tr>
-    <td align="center" width="360">
-      <img src="assets/repo_images/WeChat_Group.png" alt="OpenWAM WeChat group QR code" height="300">
-      <br><br>
-      <b>WeChat Group</b>
-      <br>
-      Scan to join
-    </td>
-    <td align="center" width="360">
-      <a href="https://discord.gg/yRSqhpNXu"><img src="assets/repo_images/Discord_QRCode.png" alt="OpenWAM Discord QR code" height="300"></a>
-      <br><br>
-      <b>Discord</b>
-      <br>
-      <a href="https://discord.gg/yRSqhpNXu">discord.gg/yRSqhpNXu</a>
-    </td>
-  </tr>
-</table>

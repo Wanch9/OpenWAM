@@ -12,7 +12,7 @@ connect to the policy over WebSocket.
 Unless marked **Inside the container**, run commands in a **host terminal at
 the checkout root**. For offline deployment, use the received bundle root.
 Docker files live in `docker/`; the root `compose.yaml` preserves the normal
-`docker compose` entrypoint. GitHub's workflow stays in `.github/workflows/`.
+`docker compose` entrypoint.
 
 ## Setup
 
