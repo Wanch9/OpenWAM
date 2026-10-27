@@ -1,0 +1,53 @@
+# Controlled baseline: warm prompt cache, no video decode; all added methods off.
+checkpoint_path: null
+device: cuda:0
+server:
+  host: 127.0.0.1
+  port: 8849
+inference:
+  denoise_steps: 10
+  denoise_mode: sync
+  lead_modality: video
+  variance_shift_alpha: 1.0
+  linear_offset: 0.0
+  inference_mode: sync
+  inference_horizon: null
+  inference_delay_steps: null
+optimization:
+  decode_video: false
+  image_decode_workers: 0
+  static_action_pinning: false
+  precompute_timesteps: false
+  skip_redundant_eval: false
+  rope_kernel: torch
+  conditional_kv_cache:
+    enabled: false
+    compact_context: false
+    precompute_context: false
+  split_prefix_attention:
+    enabled: false
+  dit_cache:
+    enabled: false
+    memoize_similarity: false
+  residual_cache:
+    enabled: false
+    refresh_steps: [0, 5, 9]
+  observation_prefix_cache:
+    enabled: false
+    compile_enabled: false
+    compile_mode: reduce-overhead
+    verify_invariants: true
+  rope_cache:
+    enabled: false
+  fixed_schedule_time_cache:
+    enabled: false
+  lightweight_residual_reuse:
+    enabled: false
+  compile:
+    enabled: false
+    self_attn:
+      torch_mode: reduce-overhead
+      dynamic: false
+  prompt_embed_cache:
+    enabled: true
+    maxsize: 32

@@ -43,11 +43,15 @@ SCHEDULES = {
     "residual5F": (0, 3, 6, 8, 9),
 }
 BASE_PHASES = ("full10F", "v3_velocity", *SCHEDULES)
-PHASES = (
-    *BASE_PHASES, *("prefix_" + name for name in BASE_PHASES),
-    "rope_prefix_residual3F", "time_prefix_residual3F", "light_prefix_residual3F",
-    "time_rope_prefix_residual3F", "time_rope_light_prefix_residual3F",
-    "time_rope_full10F", "time_rope_prefix_residual4F", "time_rope_light_prefix_residual4F",
+PHASES = tuple(
+    ("time_" if time_cache else "") + ("rope_" if rope_cache else "")
+    + ("light_" if light else "") + ("prefix_" if prefix else "") + base
+    for base in BASE_PHASES
+    for prefix in (False, True)
+    for time_cache in (False, True)
+    for rope_cache in (False, True)
+    for light in (False, True)
+    if not light or base in SCHEDULES
 )
 
 
@@ -189,6 +193,7 @@ def main():
         for seed in ([fixture["seed"]] if fixture["seed"] is not None else args.seeds)
     ]
     cfg = OmegaConf.load(args.config)
+    requested_config = OmegaConf.to_container(cfg, resolve=True)
     compile_cfg = OmegaConf.create(OmegaConf.to_container(cfg.optimization.compile, resolve=True))
     compile_cfg.enabled = not args.no_compile
     cfg.optimization.compile.enabled = False
@@ -207,6 +212,7 @@ def main():
         "fixtures": [{key: value for key, value in f.items() if key != "observation"} for f in fixtures],
         "cases": cases,
         "config": str(args.config.resolve()),
+        "requested_config": requested_config,
         "checkpoint": str(args.checkpoint.resolve()),
         "git_head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
         "torch": torch.__version__,
@@ -323,13 +329,17 @@ def main():
                 if prefix_runner is None:
                     prefix_runner = ObservationPrefixCache(
                         arch, compile_enabled=not args.no_compile,
+                        compile_mode=OmegaConf.select(compile_cfg, "self_attn.torch_mode", default="reduce-overhead"),
                         verify_invariants=not args.no_prefix_verify,
                     )
                 engine._prefix_cache = prefix_runner
                 arch._serving_prefix_cache = prefix_runner
                 name = name.removeprefix("prefix_")
             if name == "v3_velocity":
-                engine._dit_cache = DiTVelocityCache(cosine_threshold=0.99, max_consecutive_skips=3, memoize_similarity=True)
+                engine._dit_cache = DiTVelocityCache(
+                    cosine_threshold=0.99, max_consecutive_skips=3,
+                    memoize_similarity=bool(OmegaConf.select(cfg, "optimization.dit_cache.memoize_similarity", default=True)),
+                )
             elif name in SCHEDULES:
                 from openwam.deploy.optimizations.residual_cache import TransformerResidualCache
 

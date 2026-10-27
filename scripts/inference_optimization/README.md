@@ -1,5 +1,67 @@
 # 推理优化：启动、测速与回退
 
+## 按方法逐项叠加（推荐贡献/复现方式）
+
+所有实现位于同一分支，使用配置开关选择方法，不需要按历史提交顺序 cherry-pick。独立开关的定义集中在 `ablation_methods.json`；基线为 `configs/inference_ablation/base.yaml`。这样同一份代码、checkpoint、输入和 seed 可以比较任意合法组合。
+
+先取代码（PR 未合并时）：
+
+```bash
+git clone --branch codex/inference-100ms-summary https://github.com/Wanch9/OpenWAM.git
+cd OpenWAM
+```
+
+只生成配置和实验计划，**不加载模型、不测速**：
+
+```bash
+python scripts/inference_optimization/run_ablation.py --checkpoint /path/to/checkpoint --output-dir results/plan-001 --prepare-only
+```
+
+`plan.json` 为每一阶段保存启用的方法、完整 YAML 路径和可执行命令。默认累计顺序：
+
+| 阶段 | 相对上一阶段增加的唯一方法 |
+|---|---|
+| 00 | eager 基线：固定热 prompt cache、关闭视频解码，其余新增优化关闭 |
+| 01 | compile / CUDA Graph，reduce-overhead |
+| 02 | 条件 K/V 缓存 |
+| 03 | 条件 padding 裁剪 |
+| 04 | 条件 embedding 复用 |
+| 05 | 等价 attention 拆分 |
+| 06 | 固定形状 action pinning |
+| 07 | 跳过重复 eval |
+| 08 | timestep 批量准备 |
+| 09 | 并行图像处理 |
+| 10 | 首帧 prefix prefill 缓存，仍完整计算 10F |
+| 11 | 3F residual 近似复用（第一次引入残差近似） |
+| 12 | time-MLP 缓存 |
+| 13 | RoPE 网格缓存 |
+| 14 | lightweight residual 路径 |
+
+实际运行整套实验：去掉 `--prepare-only` 并使用新的输出目录。每阶段独立进程加载模型，记录加载/预热，不让上阶段的可变缓存留在下阶段；会多次加载大模型，运行时间显著长于单组测速。脚本拒绝覆盖已有目录，不自动重试失败阶段。生成后的 YAML 也可直接交给 `scripts/deploy.py --config ...`。
+
+只测一个方法：
+
+```bash
+python scripts/inference_optimization/run_ablation.py --checkpoint /path/to/checkpoint --output-dir results/compile-only --methods compile
+```
+
+任意组合（包含 eager 基线及指定组合两组）：
+
+```bash
+python scripts/inference_optimization/run_ablation.py --checkpoint /path/to/checkpoint --output-dir results/kv-compact --methods compile conditional_kv compact_context
+python scripts/inference_optimization/run_ablation.py --checkpoint /path/to/checkpoint --output-dir results/velocity --methods compile velocity memoize_similarity
+python scripts/inference_optimization/run_ablation.py --checkpoint /path/to/checkpoint --output-dir results/autotune --methods compile max_autotune
+python scripts/inference_optimization/run_ablation.py --checkpoint /path/to/checkpoint --output-dir results/rope-kernel --methods compile triton_rope
+```
+
+每次都可加 `--prepare-only`。`compact_context/context_embedding` 依赖 `conditional_kv`；`time_cache` 依赖 `batch_timesteps`；`lightweight` 依赖 `residual3f`；`memoize_similarity` 依赖 `velocity`。依赖必须显式列出，脚本不会偷偷添加其他方法。`velocity` 与 `residual3f`、两种 Triton backend 分别互斥。固定 prompt cache/不解码视频是基线条件，不在这个 ladder 中做单独消融。已撤销的 QKV 融合没有实现开关。
+
+默认仍是 LIBERO EEF10 合成输入；真实数据传 `--fixtures`，非 LIBERO 另传 `--action-contract generic`。`--no-prefix-verify` 仅在验证观测不变量后使用；默认保留检查，因此延迟不保证复现历史关闭检查的数字。
+
+完成后生成 `summary.json` / `summary.md`：每阶段均值、P95、相对基线倍数、相对**同一个 eager 基线**的完整动作误差。各阶段 JSON/NPZ 另保留逐请求统计与全部动作。自带 benchmark 的阶段内 full10F 参考保留作局部对照，不替代公共基线。累计相邻差值是该上下文下的增量收益，不代表方法在所有组合中的独立收益。
+
+新增 ladder 和移植代码按用户要求未运行验证。以上是可执行的复现入口，不是宣称这些新组合已经实测通过。
+
 实现从已测快照 `4804e061aa5a4d53601ce5bb80e5988035509575` 提取。包含 3F 残差复用、观测首帧缓存、固定调度时间缓存、RoPE 缓存、轻量复用路径及前期条件 K/V、注意力和前处理优化。训练优化与机器人通信协议不在本次移植中。
 
 ## 环境与资产
