@@ -46,10 +46,14 @@ class DiTVelocityCache:
         cosine_threshold: float = 0.99,
         max_consecutive_skips: int = 3,
         interpolation_weight: float = 0.0,
+        memoize_similarity: bool = False,
     ):
         self.cosine_threshold = cosine_threshold
         self.max_consecutive_skips = max_consecutive_skips
         self.interpolation_weight = interpolation_weight
+        self.memoize_similarity = memoize_similarity
+        self._decision_signature = None
+        self._decision_recompute = None
 
         self._cached_velocity: Optional[Tensor] = None
         self._cached_action_velocity: Optional[Tensor] = None
@@ -83,22 +87,42 @@ class DiTVelocityCache:
         if self._consecutive_skips >= self.max_consecutive_skips:
             return True
 
-        # Cosine similarity between last two velocity predictions
+        signature = None
+        if self.memoize_similarity:
+            tensors = [self._prev_velocity, self._cached_velocity]
+            if require_action:
+                tensors += [self._prev_action_velocity, self._cached_action_velocity]
+            try:
+                signature = (require_action, self.cosine_threshold, tuple((id(t), t._version) for t in tensors))
+            except RuntimeError:
+                # Inference tensors have no version counter; calculate normally.
+                pass
+        if signature is not None and signature == self._decision_signature:
+            recompute = self._decision_recompute
+        else:
+            recompute = self._compare_velocities(require_action)
+            self._decision_signature = signature
+            self._decision_recompute = recompute
+        if recompute:
+            return True
+
+        self._consecutive_skips += 1
+        self._total_skips += 1
+        return False
+
+    def _compare_velocities(self, require_action):
+        # Preserve Python float comparisons, short circuit, and NaN behavior.
         v1 = self._prev_velocity.flatten().float()
         v2 = self._cached_velocity.flatten().float()
         cos_sim = torch.nn.functional.cosine_similarity(v1.unsqueeze(0), v2.unsqueeze(0))
         if cos_sim.item() < self.cosine_threshold:
             return True
-
         if require_action:
             a1 = self._prev_action_velocity.flatten().float()
             a2 = self._cached_action_velocity.flatten().float()
             action_cos_sim = torch.nn.functional.cosine_similarity(a1.unsqueeze(0), a2.unsqueeze(0))
             if action_cos_sim.item() < self.cosine_threshold:
                 return True
-
-        self._consecutive_skips += 1
-        self._total_skips += 1
         return False
 
     def get_cached(self) -> Tensor:
@@ -126,6 +150,8 @@ class DiTVelocityCache:
                 joint forward. When present, joint denoising can skip the whole
                 forward instead of re-running it just to recover action output.
         """
+        self._decision_signature = None
+        self._decision_recompute = None
         self._prev_velocity = self._cached_velocity
         self._prev_action_velocity = self._cached_action_velocity
         self._cached_velocity = velocity.detach().clone()
@@ -135,6 +161,8 @@ class DiTVelocityCache:
 
     def reset(self):
         """Clear all cached state. Call between inference runs."""
+        self._decision_signature = None
+        self._decision_recompute = None
         self._cached_velocity = None
         self._cached_action_velocity = None
         self._cached_sigma = None

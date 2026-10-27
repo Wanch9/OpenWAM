@@ -3,6 +3,8 @@
 This cleaned copy is maintained by [Wanch9](https://github.com/Wanch9).
 It is based on [OpenWAM-Official/OpenWAM](https://github.com/OpenWAM-Official/OpenWAM); the original license and attribution are retained.
 
+维护记录：[约 100 ms 推理优化总结（中文）](assets/openwam_usage_docs/inference-100ms-summary.zh.md)：3F 残差复用、首帧/时间/RoPE 缓存及已测延迟与验证边界。[优化代码与测速用法](scripts/inference_optimization/README.md)。
+
 <p align="center"><strong>An Open, Modular Exploration Towards Systematic World–Action Model Pretraining</strong></p>
 
 <p align="center">

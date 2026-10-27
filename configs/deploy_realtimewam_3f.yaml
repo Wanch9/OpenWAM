@@ -1,0 +1,48 @@
+# Default candidate: 10 Euler updates, 3 full Transformer evaluations.
+# Prefix invariants were validated on the benchmark workload; the request
+# contract requires fixed observation prefix, conditioning, and model weights.
+checkpoint_path: null
+device: cuda:0
+server:
+  host: 127.0.0.1
+  port: 8849
+inference:
+  denoise_steps: 10
+  denoise_mode: sync
+  lead_modality: video
+  variance_shift_alpha: 1.0
+  linear_offset: 0.0
+  inference_mode: sync
+  inference_horizon: null
+  inference_delay_steps: null
+optimization:
+  image_decode_workers: 2
+  static_action_pinning: true
+  precompute_timesteps: true
+  skip_redundant_eval: true
+  decode_video: false
+  rope_kernel: torch
+  conditional_kv_cache:
+    enabled: true
+    compact_context: true
+    precompute_context: true
+  split_prefix_attention:
+    enabled: true
+  dit_cache:
+    enabled: false
+  residual_cache:
+    enabled: true
+    refresh_steps: [0, 5, 9]
+  observation_prefix_cache:
+    enabled: true
+    compile_enabled: true
+    compile_mode: reduce-overhead
+    verify_invariants: false
+  compile:
+    enabled: true
+    self_attn:
+      torch_mode: reduce-overhead
+      dynamic: false
+  prompt_embed_cache:
+    enabled: true
+    maxsize: 32

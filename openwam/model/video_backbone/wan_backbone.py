@@ -365,17 +365,22 @@ class WanBase(VideoBackbone):
         use_gradient_checkpointing_offload = kw.get("use_gradient_checkpointing_offload", False)
         force_per_token_t_mod = bool(kw.get("force_per_token_t_mod", False))
 
-        time_embed, time_modulation = wan_dit_forward.build_time_modulation(
-            dit,
-            timestep,
-            latents,
-            patch_size=self._dit_patch_size,
-            fuse_vae_embedding_in_latents=fuse_vae_embedding_in_latents,
-            force_per_token_t_mod=force_per_token_t_mod,
-            num_clean_prefix_frames=num_clean_prefix_frames,
-            zero_clean_prefix_t_mod=bool(kw.get("zero_clean_prefix_t_mod", False)),
-            has_first_frame_latents=kw.get("first_frame_latents") is not None,
-        )
+        time_kwargs = {
+            "patch_size": self._dit_patch_size,
+            "fuse_vae_embedding_in_latents": fuse_vae_embedding_in_latents,
+            "force_per_token_t_mod": force_per_token_t_mod,
+            "num_clean_prefix_frames": num_clean_prefix_frames,
+            "zero_clean_prefix_t_mod": bool(kw.get("zero_clean_prefix_t_mod", False)),
+            "has_first_frame_latents": kw.get("first_frame_latents") is not None,
+        }
+        time_cache = getattr(self, "_serving_time_cache", None)
+        if time_cache is not None and time_cache.active:
+            time_embed, time_modulation = time_cache.video(
+                dit, timestep, latents, **time_kwargs,
+                compute=lambda: wan_dit_forward.build_time_modulation(dit, timestep, latents, **time_kwargs),
+            )
+        else:
+            time_embed, time_modulation = wan_dit_forward.build_time_modulation(dit, timestep, latents, **time_kwargs)
 
         if motion_bucket_id is not None and motion_controller is not None:
             motion_term = motion_controller(motion_bucket_id).unflatten(1, (6, dit.dim))  # (B, 6, dim)
@@ -384,7 +389,16 @@ class WanBase(VideoBackbone):
                 # right-aligns and aliases B onto L (mis-broadcasts when B == L).
                 motion_term = motion_term.unsqueeze(1)  # (B, 1, 6, dim)
             time_modulation = time_modulation + motion_term
-        context = dit.text_embedding(context)
+        conditioning_cache = getattr(self, "_serving_conditioning_cache", None)
+        if (
+            conditioning_cache is not None
+            and conditioning_cache.active
+            and conditioning_cache.precompute_context
+            and not self.training
+        ):
+            context = conditioning_cache.embed_context("video", dit.text_embedding, context)
+        else:
+            context = dit.text_embedding(context)
         if context_mask is None:
             if seq_lens is not None:
                 seq_lens = seq_lens.to(device=context.device)
@@ -422,24 +436,30 @@ class WanBase(VideoBackbone):
 
         grid_frames, grid_height, grid_width = hidden_states.shape[2:]
         hidden_states = rearrange(hidden_states, "b c f h w -> b (f h w) c").contiguous()
-        freqs = (
-            torch.cat(
-                [
-                    dit.freqs[0][:grid_frames]
-                    .view(grid_frames, 1, 1, -1)
-                    .expand(grid_frames, grid_height, grid_width, -1),
-                    dit.freqs[1][:grid_height]
-                    .view(1, grid_height, 1, -1)
-                    .expand(grid_frames, grid_height, grid_width, -1),
-                    dit.freqs[2][:grid_width]
-                    .view(1, 1, grid_width, -1)
-                    .expand(grid_frames, grid_height, grid_width, -1),
-                ],
-                dim=-1,
+        rope_cache = getattr(self, "_serving_rope_cache", None)
+        if rope_cache is not None and rope_cache.enabled and not self.training and not torch.is_grad_enabled():
+            freqs = rope_cache.get(
+                dit.freqs, (grid_frames, grid_height, grid_width), hidden_states.device, training=self.training
             )
-            .reshape(grid_frames * grid_height * grid_width, 1, -1)
-            .to(hidden_states.device)
-        )
+        else:
+            freqs = (
+                torch.cat(
+                    [
+                        dit.freqs[0][:grid_frames]
+                        .view(grid_frames, 1, 1, -1)
+                        .expand(grid_frames, grid_height, grid_width, -1),
+                        dit.freqs[1][:grid_height]
+                        .view(1, grid_height, 1, -1)
+                        .expand(grid_frames, grid_height, grid_width, -1),
+                        dit.freqs[2][:grid_width]
+                        .view(1, 1, grid_width, -1)
+                        .expand(grid_frames, grid_height, grid_width, -1),
+                    ],
+                    dim=-1,
+                )
+                .reshape(grid_frames * grid_height * grid_width, 1, -1)
+                .to(hidden_states.device)
+            )
 
         extras = {
             "dit": dit,
@@ -540,11 +560,24 @@ class WanBase(VideoBackbone):
         attn_input = modulate(block.norm1(state.hidden_states), shift_msa, scale_msa)
 
         self_attn = block.self_attn
-        q = self_attn.norm_q(self_attn.q(attn_input))
-        k = self_attn.norm_k(self_attn.k(attn_input))
-        v = self_attn.v(attn_input)
-        q = rope_apply(q, state.rope_freqs, self_attn.num_heads)
-        k = rope_apply(k, state.rope_freqs, self_attn.num_heads)
+        rope_mode = getattr(self_attn, "_serving_rope_mode", "torch")
+        if rope_mode != "torch" and not self_attn.training:
+            q, k, v = self_attn.q(attn_input), self_attn.k(attn_input), self_attn.v(attn_input)
+            normalize = rope_mode == "triton_norm_rope"
+            if not normalize:
+                q, k = self_attn.norm_q(q), self_attn.norm_k(k)
+            q = self_attn._serving_rope_fn(
+                q, self_attn.norm_q.weight, state.rope_freqs, self_attn.norm_q.eps, self_attn.num_heads, normalize
+            )
+            k = self_attn._serving_rope_fn(
+                k, self_attn.norm_k.weight, state.rope_freqs, self_attn.norm_k.eps, self_attn.num_heads, normalize
+            )
+        else:
+            q = self_attn.norm_q(self_attn.q(attn_input))
+            k = self_attn.norm_k(self_attn.k(attn_input))
+            v = self_attn.v(attn_input)
+            q = rope_apply(q, state.rope_freqs, self_attn.num_heads)
+            k = rope_apply(k, state.rope_freqs, self_attn.num_heads)
 
         post_state = (residual_x, gate_msa, shift_mlp, scale_mlp, gate_mlp)
         return q, k, v, post_state

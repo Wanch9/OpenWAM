@@ -52,6 +52,7 @@ def assemble_multiview_layout(
     out_w: int,
     top_height_ratio: float = 2.0 / 3.0,
     return_missing_mask: bool = False,
+    executor=None,
 ) -> Union[Image.Image, Tuple[Image.Image, Image.Image]]:
     """3-camera L-shape composition (FastWAM / RoboTwin compatible).
 
@@ -90,23 +91,31 @@ def assemble_multiview_layout(
     canvas = Image.new("RGB", (out_w, out_h), (0, 0, 0))
     missing_mask = Image.new("L", (out_w, out_h), 0) if return_missing_mask else None
 
-    top_frame = frames_by_camera.get(camera_layout[0])
-    if top_frame is not None:
-        canvas.paste(_stretch_resize(top_frame, top_h, out_w), (0, 0))
-    elif missing_mask is not None:
-        missing_mask.paste(255, (0, 0, out_w, top_h))
-
-    bl_frame = frames_by_camera.get(camera_layout[1])
-    if bl_frame is not None:
-        canvas.paste(_stretch_resize(bl_frame, bottom_h, half_w), (0, top_h))
-    elif missing_mask is not None:
-        missing_mask.paste(255, (0, top_h, half_w, out_h))
-
-    br_frame = frames_by_camera.get(camera_layout[2])
-    if br_frame is not None:
-        canvas.paste(_stretch_resize(br_frame, bottom_h, right_w), (half_w, top_h))
-    elif missing_mask is not None:
-        missing_mask.paste(255, (half_w, top_h, out_w, out_h))
+    slots = [
+        (camera_layout[0], top_h, out_w, (0, 0), (0, 0, out_w, top_h)),
+        (camera_layout[1], bottom_h, half_w, (0, top_h), (0, top_h, half_w, out_h)),
+        (camera_layout[2], bottom_h, right_w, (half_w, top_h), (half_w, top_h, out_w, out_h)),
+    ]
+    futures = {}
+    if executor is not None:
+        for index, (camera, height, width, _, _) in enumerate(slots):
+            frame = frames_by_camera.get(camera)
+            if frame is not None:
+                # Fully load lazy PIL inputs before workers read shared pixels.
+                frame.load()
+                futures[index] = executor.submit(_stretch_resize, frame, height, width)
+    try:
+        for index, (camera, height, width, position, box) in enumerate(slots):
+            frame = frames_by_camera.get(camera)
+            if frame is not None:
+                tile = futures[index].result() if executor is not None else _stretch_resize(frame, height, width)
+                canvas.paste(tile, position)
+            elif missing_mask is not None:
+                missing_mask.paste(255, box)
+    except Exception:
+        for future in futures.values():
+            future.cancel()
+        raise
 
     if missing_mask is not None:
         return canvas, missing_mask

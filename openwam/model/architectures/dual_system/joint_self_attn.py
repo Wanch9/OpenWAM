@@ -178,13 +178,45 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
     ) -> Tuple[Tensor, Optional[Tensor]]:
         vb = self.video_backbone
         ab = self.action_backbone
+        residual_cache = getattr(self, "_serving_residual_cache", None)
+        residual_active = residual_cache is not None and residual_cache.active
+        if residual_active and (
+            self.training
+            or torch.is_grad_enabled()
+            or use_gradient_checkpointing
+            or use_gradient_checkpointing_offload
+            or noisy_actions is None
+            or ab is None
+        ):
+            raise RuntimeError("Transformer residual reuse requires joint, no-grad, eval-mode inference")
         if vb is None:
             raise RuntimeError(
                 "video_backbone is None — pass pipe= to build_architecture or "
                 "architecture.__init__ to enable forward()."
             )
 
+        lightweight_reuse = getattr(self, "_serving_lightweight_reuse", None)
+        if (
+            residual_active
+            and lightweight_reuse is not None
+            and lightweight_reuse.active
+            and not residual_cache.next_is_refresh
+        ):
+            prediction = lightweight_reuse.run(
+                noisy_actions, action_timestep, proprio=proprio, **pipeline_inputs
+            )
+            if prediction is not None:
+                return prediction
+
         pipeline_inputs = self._append_proprio_context_token(dict(pipeline_inputs), proprio)
+        conditioning_cache = getattr(self, "_serving_conditioning_cache", None)
+        if (
+            conditioning_cache is not None
+            and conditioning_cache.active
+            and conditioning_cache.precompute_context
+            and not self.training
+        ):
+            pipeline_inputs = conditioning_cache.prepare_inputs(pipeline_inputs)
         action_context = pipeline_inputs.get("context")
         action_context_mask = pipeline_inputs.get("context_mask")
         if action_context is not None and action_context_mask is None and pipeline_inputs.get("seq_lens") is not None:
@@ -226,26 +258,54 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
             use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
         )
         compiled_loop = getattr(self, "_compiled_mot_run_joint_loop", None)
-        if compiled_loop is not None and not use_gradient_checkpointing and not use_gradient_checkpointing_offload:
-            try:
-                vstate, astate = compiled_loop(vstate, astate)
-            except Exception as exc:
-                self._compiled_mot_run_joint_loop = None
-                logger.warning("dual self-attn compiled MoT loop failed; falling back to eager: %s", exc)
+        conditioning_cache = getattr(self, "_serving_conditioning_cache", None)
+        if conditioning_cache is not None and conditioning_cache.active and not self.training:
+            conditioning_cache.prepare(
+                vstate.context, astate.payload.context, vstate.context_mask, astate.payload.context_mask
+            )
+        def run_transformer():
+            nonlocal vstate, astate
+            prefix_cache = getattr(self, "_serving_prefix_cache", None)
+            if prefix_cache is not None and prefix_cache.active:
+                vstate, astate = prefix_cache.run(vstate, astate)
+                return vstate.hidden_states, astate.payload.x_action
+            if compiled_loop is not None and not use_gradient_checkpointing and not use_gradient_checkpointing_offload:
+                try:
+                    vstate, astate = compiled_loop(vstate, astate)
+                except Exception as exc:
+                    self._compiled_mot_run_joint_loop = None
+                    logger.warning("dual self-attn compiled MoT loop failed; falling back to eager: %s", exc)
+                    vstate, astate = driver.run_joint_loop(
+                        vstate,
+                        astate,
+                        use_gradient_checkpointing=use_gradient_checkpointing,
+                        use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
+                    )
+            else:
                 vstate, astate = driver.run_joint_loop(
                     vstate,
                     astate,
                     use_gradient_checkpointing=use_gradient_checkpointing,
                     use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
                 )
-        else:
-            vstate, astate = driver.run_joint_loop(
-                vstate,
-                astate,
-                use_gradient_checkpointing=use_gradient_checkpointing,
-                use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
+            return vstate.hidden_states, astate.payload.x_action
+
+        if residual_active:
+            video_hidden, action_hidden = residual_cache.run(
+                vstate.hidden_states, astate.payload.x_action, run_transformer
             )
-        return vb.finalize(vstate), ab.extract_prediction(astate)
+            vstate.hidden_states = video_hidden
+            astate.payload.x_action = action_hidden
+        else:
+            run_transformer()
+        # Both heads consume the current hidden states even on reuse updates.
+        # The video head also uses the current time embedding; the action head
+        # is a decoder, with joint/time conditioning represented by its residual.
+        video_prediction = vb.finalize(vstate)
+        action_prediction = ab.extract_prediction(astate)
+        if residual_active:
+            residual_cache.record_head_evaluation()
+        return video_prediction, action_prediction
 
 
 __all__ = ["DualSystemSelfAttnArchitecture"]

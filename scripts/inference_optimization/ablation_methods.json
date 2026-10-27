@@ -1,0 +1,21 @@
+{
+  "compile": {"optimization.compile.enabled": true},
+  "conditional_kv": {"optimization.conditional_kv_cache.enabled": true},
+  "compact_context": {"optimization.conditional_kv_cache.compact_context": true},
+  "context_embedding": {"optimization.conditional_kv_cache.precompute_context": true},
+  "split_attention": {"optimization.split_prefix_attention.enabled": true},
+  "static_actions": {"optimization.static_action_pinning": true},
+  "skip_eval": {"optimization.skip_redundant_eval": true},
+  "batch_timesteps": {"optimization.precompute_timesteps": true},
+  "parallel_images": {"optimization.image_decode_workers": 2},
+  "prefix": {"optimization.observation_prefix_cache.enabled": true},
+  "residual3f": {"optimization.residual_cache.enabled": true},
+  "time_cache": {"optimization.fixed_schedule_time_cache.enabled": true},
+  "rope_cache": {"optimization.rope_cache.enabled": true},
+  "lightweight": {"optimization.lightweight_residual_reuse.enabled": true},
+  "velocity": {"optimization.dit_cache.enabled": true},
+  "memoize_similarity": {"optimization.dit_cache.memoize_similarity": true},
+  "max_autotune": {"optimization.compile.self_attn.torch_mode": "max-autotune"},
+  "triton_rope": {"optimization.rope_kernel": "triton_rope"},
+  "triton_norm_rope": {"optimization.rope_kernel": "triton_norm_rope"}
+}

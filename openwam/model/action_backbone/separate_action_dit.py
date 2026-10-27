@@ -161,8 +161,13 @@ class BridgeCrossAttention(nn.Module):
 
     def forward(self, x_action: torch.Tensor, x_video: torch.Tensor, ctx_mask: Optional[torch.Tensor] = None):
         q = self.norm_q(self.q(x_action))
-        k = self.norm_k(self.k(x_video))
-        v = self.v(x_video)
+        if getattr(self, "_serving_kv_active", False) and not self.training:
+            k, v = self._serving_key_cache, self._serving_value_cache
+            if getattr(self, "_serving_compact_context", False):
+                ctx_mask = self._serving_context_mask
+        else:
+            k = self.norm_k(self.k(x_video))
+            v = self.v(x_video)
 
         q = rearrange(q, "b s (n d) -> b n s d", n=self.num_heads)
         k = rearrange(k, "b s (n d) -> b n s d", n=self.num_heads)
@@ -551,7 +556,16 @@ class ActionDiT(ActionDiTBackbone):
             raise ValueError(f"context last dim must match text_dim={self.text_dim}, got {context.shape[-1]}")
 
         context = context.to(device=device, dtype=dtype)
-        context_emb = self.text_embedding(context)
+        conditioning_cache = getattr(self, "_serving_conditioning_cache", None)
+        if (
+            conditioning_cache is not None
+            and conditioning_cache.active
+            and conditioning_cache.precompute_context
+            and not self.training
+        ):
+            context_emb = conditioning_cache.embed_context("action", self.text_embedding, context)
+        else:
+            context_emb = self.text_embedding(context)
         if context_mask is None:
             context_mask = torch.ones(context.shape[:2], dtype=torch.bool, device=device)
         else:
@@ -724,8 +738,16 @@ class ActionDiT(ActionDiTBackbone):
 
         x = self._embed_actions(noisy_actions)
         timestep = self._prepare_timestep(timestep, noisy_actions.shape[0])
-        t = self.time_embedding(timestep)
-        t_mod = self.time_projection(t)
+        time_cache = getattr(self, "_serving_time_cache", None)
+        if time_cache is not None and time_cache.active:
+            def compute_time():
+                embedded = self.time_embedding(timestep)
+                return embedded, self.time_projection(embedded)
+
+            t, t_mod = time_cache.action(self, timestep, compute=compute_time)
+        else:
+            t = self.time_embedding(timestep)
+            t_mod = self.time_projection(t)
         action_freqs = self._get_rope_freqs(x.shape[1]).to(device=x.device)
 
         action_context = None
@@ -796,21 +818,34 @@ class ActionDiT(ActionDiTBackbone):
         attn_input = block.self_attn_norm(residual_x) * (1 + scale_msa) + shift_msa
 
         sa = block.self_attn
-        q = sa.norm_q(sa.q(attn_input))
-        k = sa.norm_k(sa.k(attn_input))
-        v = sa.v(attn_input)
+        rope_mode = getattr(sa, "_serving_rope_mode", "torch")
+        if rope_mode != "torch" and not sa.training:
+            q, k, v_out = sa.q(attn_input), sa.k(attn_input), sa.v(attn_input)
+            normalize = rope_mode == "triton_norm_rope"
+            if not normalize:
+                q, k = sa.norm_q(q), sa.norm_k(k)
+            q_out = sa._serving_rope_fn(
+                q, sa.norm_q.weight, payload.action_freqs, sa.norm_q.eps, self._num_heads, normalize
+            )
+            k_out = sa._serving_rope_fn(
+                k, sa.norm_k.weight, payload.action_freqs, sa.norm_k.eps, self._num_heads, normalize
+            )
+        else:
+            q = sa.norm_q(sa.q(attn_input))
+            k = sa.norm_k(sa.k(attn_input))
+            v = sa.v(attn_input)
 
-        # Apply RoPE in head-split layout to match flash_attn / Wan rope_apply.
-        q = rearrange(q, "b s (n d) -> b n s d", n=self._num_heads)
-        k = rearrange(k, "b s (n d) -> b n s d", n=self._num_heads)
-        v = rearrange(v, "b s (n d) -> b n s d", n=self._num_heads)
+            # Apply RoPE in head-split layout to match flash_attn / Wan rope_apply.
+            q = rearrange(q, "b s (n d) -> b n s d", n=self._num_heads)
+            k = rearrange(k, "b s (n d) -> b n s d", n=self._num_heads)
+            v = rearrange(v, "b s (n d) -> b n s d", n=self._num_heads)
 
-        q = rope_apply_1d(q, payload.action_freqs)
-        k = rope_apply_1d(k, payload.action_freqs)
-        # Driver consumes (B, S, H*D) — keep modality streams in matching layout.
-        q_out = rearrange(q, "b n s d -> b s (n d)", n=self._num_heads)
-        k_out = rearrange(k, "b n s d -> b s (n d)", n=self._num_heads)
-        v_out = rearrange(v, "b n s d -> b s (n d)", n=self._num_heads)
+            q = rope_apply_1d(q, payload.action_freqs)
+            k = rope_apply_1d(k, payload.action_freqs)
+            # Driver consumes (B, S, H*D) — keep modality streams in matching layout.
+            q_out = rearrange(q, "b n s d -> b s (n d)", n=self._num_heads)
+            k_out = rearrange(k, "b n s d -> b s (n d)", n=self._num_heads)
+            v_out = rearrange(v, "b n s d -> b s (n d)", n=self._num_heads)
 
         post_state = (residual_x, gate_msa, shift_mlp, scale_mlp, gate_mlp)
         return q_out, k_out, v_out, post_state

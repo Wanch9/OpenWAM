@@ -228,6 +228,9 @@ class PolicyServer:
         """Clean up async resources."""
         if self._policy is not None:
             self._policy.shutdown()
+        close_images = getattr(getattr(self, "_obs_preprocessor", None), "shutdown", None)
+        if close_images is not None:
+            close_images()
 
     def run(self, host: str = "0.0.0.0", port: int = 8848):
         """Start the WebSocket policy server.
