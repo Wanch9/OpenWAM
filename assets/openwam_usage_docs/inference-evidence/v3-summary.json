@@ -1,0 +1,288 @@
+{
+  "conditions": "3 varying prompts/states; identical weights, BF16, 384x320, 10 steps, fresh 32-action chunk each call",
+  "torch": "2.7.1+cu128",
+  "cuda": "12.8",
+  "device": "NVIDIA RTX 6000D",
+  "config": "configs/deploy_sg88n5_optimized_v3.yaml",
+  "timing": "CUDA synchronized server.predict; JPEG decode, preprocessing, full fresh 32-action chunk, postprocess included; no network; warm prompt cache; profiler excluded",
+  "baseline_eval_mode_ms": [
+    5.179755040444434,
+    5.186702008359134,
+    5.099051049910486
+  ],
+  "reference": "previous optimized v2, no velocity caching, no compilation",
+  "frontends_exact_numerical": [
+    {
+      "fixture": 0,
+      "max_abs": 0.0,
+      "mean_abs": 0.0,
+      "deployed_max_abs": 0.0
+    },
+    {
+      "fixture": 1,
+      "max_abs": 0.0,
+      "mean_abs": 0.0,
+      "deployed_max_abs": 0.0
+    },
+    {
+      "fixture": 2,
+      "max_abs": 0.0,
+      "mean_abs": 0.0,
+      "deployed_max_abs": 0.0
+    }
+  ],
+  "parallel_exact_numerical": [
+    {
+      "fixture": 0,
+      "max_abs": 0.0,
+      "mean_abs": 0.0,
+      "deployed_max_abs": 0.0
+    },
+    {
+      "fixture": 1,
+      "max_abs": 0.0,
+      "mean_abs": 0.0,
+      "deployed_max_abs": 0.0
+    },
+    {
+      "fixture": 2,
+      "max_abs": 0.0,
+      "mean_abs": 0.0,
+      "deployed_max_abs": 0.0
+    }
+  ],
+  "untimed_profile": {
+    "cuda_graph_launches": 4
+  },
+  "phases": [
+    {
+      "name": "base",
+      "summary": {
+        "wall_ms": {
+          "count": 60,
+          "mean": 174.52187308420739,
+          "median": 174.49673000373878,
+          "p95": 175.60809503193013,
+          "min": 171.9778870465234,
+          "max": 176.87451897654682,
+          "std": 0.7363340253065018
+        },
+        "pipeline_prep_ms": {
+          "count": 60,
+          "mean": 8.966666666666667,
+          "median": 9.0,
+          "p95": 9.0,
+          "min": 8.0,
+          "max": 9.0,
+          "std": 0.17950549357115012
+        },
+        "denoising_loop_ms": {
+          "count": 60,
+          "mean": 147.56666666666666,
+          "median": 148.0,
+          "p95": 148.05,
+          "min": 146.0,
+          "max": 150.0,
+          "std": 0.6674994798166929
+        }
+      },
+      "compile": {
+        "mot_compiled_callable_present": true,
+        "inductor_counters": {
+          "async_compile_cache_miss": 52,
+          "pattern_matcher_count": 420,
+          "pattern_matcher_nodes": 420,
+          "extern_calls": 1560,
+          "async_compile_cache_hit": 26,
+          "fxgraph_cache_hit": 1,
+          "cudagraph_recorded_non_static_inputs": 7
+        },
+        "cuda_graph_tree_manager_present": true,
+        "cuda_graph_tree_roots": 1
+      },
+      "bitwise_equal_to_v2": true
+    },
+    {
+      "name": "frontends",
+      "summary": {
+        "wall_ms": {
+          "count": 60,
+          "mean": 168.45365033271568,
+          "median": 168.48540300270543,
+          "p95": 169.1952555149328,
+          "min": 166.8510000454262,
+          "max": 170.84661102853715,
+          "std": 0.5874320822838568
+        },
+        "pipeline_prep_ms": {
+          "count": 60,
+          "mean": 8.45,
+          "median": 8.0,
+          "p95": 9.0,
+          "min": 8.0,
+          "max": 9.0,
+          "std": 0.49749371855330987
+        },
+        "denoising_loop_ms": {
+          "count": 60,
+          "mean": 145.43333333333334,
+          "median": 145.0,
+          "p95": 146.0,
+          "min": 144.0,
+          "max": 148.0,
+          "std": 0.6420453428086076
+        }
+      },
+      "compile": {
+        "mot_compiled_callable_present": true,
+        "inductor_counters": {
+          "async_compile_cache_miss": 52,
+          "pattern_matcher_count": 420,
+          "pattern_matcher_nodes": 420,
+          "extern_calls": 1560,
+          "async_compile_cache_hit": 26,
+          "fxgraph_cache_hit": 1,
+          "cudagraph_recorded_non_static_inputs": 7
+        },
+        "cuda_graph_tree_manager_present": true,
+        "cuda_graph_tree_roots": 1
+      },
+      "bitwise_equal_to_v2": true
+    },
+    {
+      "name": "parallel",
+      "summary": {
+        "wall_ms": {
+          "count": 60,
+          "mean": 167.1565123659093,
+          "median": 166.98765999171883,
+          "p95": 169.063962859218,
+          "min": 165.15065700514242,
+          "max": 169.59211399080232,
+          "std": 0.9269913416594449
+        },
+        "pipeline_prep_ms": {
+          "count": 60,
+          "mean": 8.116666666666667,
+          "median": 8.0,
+          "p95": 9.0,
+          "min": 8.0,
+          "max": 9.0,
+          "std": 0.3210226714043038
+        },
+        "denoising_loop_ms": {
+          "count": 60,
+          "mean": 144.11666666666667,
+          "median": 144.0,
+          "p95": 145.0,
+          "min": 143.0,
+          "max": 146.0,
+          "std": 0.6348665651580304
+        }
+      },
+      "compile": {
+        "mot_compiled_callable_present": true,
+        "inductor_counters": {
+          "async_compile_cache_miss": 52,
+          "pattern_matcher_count": 420,
+          "pattern_matcher_nodes": 420,
+          "extern_calls": 1560,
+          "async_compile_cache_hit": 26,
+          "fxgraph_cache_hit": 1,
+          "cudagraph_recorded_non_static_inputs": 7
+        },
+        "cuda_graph_tree_manager_present": true,
+        "cuda_graph_tree_roots": 1
+      },
+      "bitwise_equal_to_v2": true
+    },
+    {
+      "name": "parallel_repeat",
+      "summary": {
+        "wall_ms": {
+          "count": 60,
+          "mean": 166.70389154557293,
+          "median": 166.7083115025889,
+          "p95": 167.68613202148117,
+          "min": 165.41815898381174,
+          "max": 168.13970904331654,
+          "std": 0.6034101875525055
+        },
+        "pipeline_prep_ms": {
+          "count": 60,
+          "mean": 8.0,
+          "median": 8.0,
+          "p95": 8.0,
+          "min": 8.0,
+          "max": 8.0,
+          "std": 0.0
+        },
+        "denoising_loop_ms": {
+          "count": 60,
+          "mean": 143.88333333333333,
+          "median": 144.0,
+          "p95": 145.0,
+          "min": 143.0,
+          "max": 145.0,
+          "std": 0.5193478816960961
+        }
+      },
+      "compile": {
+        "mot_compiled_callable_present": true,
+        "inductor_counters": {
+          "async_compile_cache_miss": 52,
+          "pattern_matcher_count": 420,
+          "pattern_matcher_nodes": 420,
+          "extern_calls": 1560,
+          "async_compile_cache_hit": 26,
+          "fxgraph_cache_hit": 1,
+          "cudagraph_recorded_non_static_inputs": 7
+        },
+        "cuda_graph_tree_manager_present": true,
+        "cuda_graph_tree_roots": 1
+      },
+      "bitwise_equal_to_v2": true
+    }
+  ],
+  "selected_summary": {
+    "wall_ms": {
+      "count": 120,
+      "mean": 166.93020195574113,
+      "median": 166.83673800434917,
+      "p95": 168.52536626684014,
+      "min": 165.15065700514242,
+      "max": 169.59211399080232,
+      "std": 0.8142019422276959
+    },
+    "denoising_loop_ms": {
+      "count": 120,
+      "mean": 144.0,
+      "median": 144.0,
+      "p95": 145.0,
+      "min": 143.0,
+      "max": 146.0,
+      "std": 0.5916079783099616
+    },
+    "pipeline_prep_ms": {
+      "count": 120,
+      "mean": 8.058333333333334,
+      "median": 8.0,
+      "p95": 9.0,
+      "min": 8.0,
+      "max": 9.0,
+      "std": 0.23437268517375381
+    },
+    "observation_preprocess_ms": {
+      "count": 120,
+      "mean": 11.41649209021125,
+      "median": 11.391114501748234,
+      "p95": 12.261133006541058,
+      "min": 9.295435971580446,
+      "max": 12.791229994036257,
+      "std": 0.5637718944299523
+    }
+  },
+  "selected_over_170": 0,
+  "selected_bitwise_to_v2": true,
+  "selected_deployed_bitwise_to_v2": true
+}
