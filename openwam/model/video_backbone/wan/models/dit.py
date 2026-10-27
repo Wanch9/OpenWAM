@@ -187,6 +187,9 @@ class CrossAttention(nn.Module):
         self.norm_q = RMSNorm(dim, eps=eps)
         self.norm_k = RMSNorm(dim, eps=eps)
         self.has_image_input = has_image_input
+        self.register_buffer("_serving_key_cache", None, persistent=False)
+        self.register_buffer("_serving_value_cache", None, persistent=False)
+        self._serving_kv_active = False
         if has_image_input:
             self.k_img = nn.Linear(dim, dim)
             self.v_img = nn.Linear(dim, dim)
@@ -203,8 +206,13 @@ class CrossAttention(nn.Module):
         else:
             ctx = y
         q = self.norm_q(self.q(x))
-        k = self.norm_k(self.k(ctx))
-        v = self.v(ctx)
+        if self._serving_kv_active and not self.training:
+            k, v = self._serving_key_cache, self._serving_value_cache
+            if getattr(self, "_serving_compact_context", False):
+                ctx_mask = self._serving_context_mask
+        else:
+            k = self.norm_k(self.k(ctx))
+            v = self.v(ctx)
         x = self.attn(q, k, v, attn_mask=ctx_mask)
         if self.has_image_input:
             k_img = self.norm_k_img(self.k_img(img))

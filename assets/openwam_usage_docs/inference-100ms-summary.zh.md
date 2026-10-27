@@ -4,7 +4,7 @@
 
 **“100 ms”指特定条件下约 100 ms 的新动作段生成延迟，不是所有设备上的保证。** 后续部署记录引用的 RTX 6000D / LIBERO 结果为 **101.84 ms**；本次整理直接复核到逐次结果的 RTX 4090 / G1D 实验为 **112.50 ms 均值、114.93 ms P95**。
 
-本文是文档与实测摘要交付，不包含实现代码的合并。下方模块名、配置名指已测实现快照 `4804e061aa5a4d53601ce5bb80e5988035509575`，不能假定当前仓库 main 已包含这些实现；仅复制配置不能启用优化。
+本分支已包含从已测快照 `4804e061aa5a4d53601ce5bb80e5988035509575` 提取的推理优化实现、配置、测速脚本和回归测试。见 [启动与测速指南](../../scripts/inference_optimization/README.md)。本次移植没有包含训练优化、机器人协议或机器专用跨卡部署改动；历史 GPU 测量仍以对应快照和环境为准。
 
 ## 1. 核心：10 次更新，3 次完整 Transformer
 
@@ -55,7 +55,7 @@ h_out ≈ h_current + r_cached
 
 这些准备和执行优化旨在保持既定 3F 算法结果，不消除 3F 本身相对 10F 的近似误差。
 
-实现位置：`openwam/deploy/optimizations/{time_cache,rope_cache,lightweight_reuse,conditional_kv}.py`（具体条件 K/V 文件名以实现快照为准）、部署 engine、视频/动作 backbone 和服务端预处理。
+实现位置：`openwam/deploy/optimizations/{time_cache,rope_cache,lightweight_reuse,conditional_kv}.py`、部署 engine、视频/动作 backbone 和服务端预处理。
 
 ## 4. 实测结果与计时范围
 
@@ -89,7 +89,7 @@ G1D 的全部 12 个配对 case 中，原 3F 与第二轮 3F 的完整 `(32,80)`
 
 ## 6. 配置与复现检查
 
-已测配置名称：`deploy_realtimewam_3f_v2.yaml`。关键设置如下（仅为实现对接说明，不是当前 main 可独立运行的配置）：
+已测配置名称：`deploy_realtimewam_3f_v2.yaml`。关键设置如下（本分支提供完整配置；启动时需指定自有 checkpoint）：
 
 ```yaml
 inference:

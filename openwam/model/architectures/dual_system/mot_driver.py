@@ -128,6 +128,7 @@ class DualSystemMoTDriver:
         k_cat: Tensor,
         v_cat: Tensor,
         attn_mask: Optional[Tensor],
+        first_frame_tokens: int = 0,
     ) -> Tensor:
         """Single mixed self-attention over the concatenated [v, a] sequence.
 
@@ -139,7 +140,19 @@ class DualSystemMoTDriver:
         q = rearrange(q_cat, "b s (n d) -> b n s d", n=n)
         k = rearrange(k_cat, "b s (n d) -> b n s d", n=n)
         v = rearrange(v_cat, "b s (n d) -> b n s d", n=n)
-        out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+        if first_frame_tokens:
+            # Equivalent to mutual + first-frame-causal visibility, without a
+            # dense mask: the clean frame sees itself; other queries see all.
+            prefix = first_frame_tokens
+            out = torch.cat(
+                [
+                    F.scaled_dot_product_attention(q[:, :, :prefix], k[:, :, :prefix], v[:, :, :prefix]),
+                    F.scaled_dot_product_attention(q[:, :, prefix:], k, v),
+                ],
+                dim=2,
+            )
+        else:
+            out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
         return rearrange(out, "b n s d -> b s (n d)", n=n)
 
     # ------------------------------------------------------------------
@@ -242,7 +255,18 @@ class DualSystemMoTDriver:
                 self._mixed_attention, q_cat, k_cat, v_cat, attn_mask, use_reentrant=False
             )
         else:
-            mixed = self._mixed_attention(q_cat, k_cat, v_cat, attn_mask)
+            prefix = 0
+            if (
+                getattr(self, "split_prefix_attention", False)
+                and not vb.training
+                and not ab.training
+                and self.attention_mask_mode == "mutual"
+                and getattr(vb, "video_attention_mask_mode", None) == "first_frame_causal"
+                and not int(getattr(vstate, "prefix_kv_len", 0) or 0)
+                and attn_mask is not None
+            ):
+                prefix = min(self._video_tokens_per_frame(vstate), s_video)
+            mixed = self._mixed_attention(q_cat, k_cat, v_cat, attn_mask, first_frame_tokens=prefix)
 
         attn_v, attn_a = mixed.split([s_video, s_action], dim=1)
         vstate = vb.post_attn_at_layer(layer_id, vstate, attn_v.contiguous(), vpost)

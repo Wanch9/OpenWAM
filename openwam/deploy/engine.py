@@ -13,6 +13,7 @@ import logging
 import os
 from abc import ABC, abstractmethod
 from collections import OrderedDict
+from contextlib import ExitStack
 from typing import Any, Optional
 
 import torch
@@ -198,8 +199,90 @@ class JointInferenceEngine(BaseInferenceEngine):
                 self._dit_cache = DiTVelocityCache(
                     cosine_threshold=getattr(dc, "cosine_threshold", 0.99),
                     max_consecutive_skips=getattr(dc, "max_skips", 3),
+                    memoize_similarity=bool(getattr(dc, "memoize_similarity", False)),
                 )
                 logger.info("DiT velocity cache enabled (threshold=%.3f)", dc.cosine_threshold)
+
+        self._residual_cache = None
+        self.architecture._serving_residual_cache = None
+        residual_cfg = getattr(optimization, "residual_cache", None) if optimization else None
+        if residual_cfg is not None and getattr(residual_cfg, "enabled", False):
+            from openwam.deploy.optimizations.residual_cache import TransformerResidualCache
+            from openwam.model.architectures.dual_system.joint_self_attn import DualSystemSelfAttnArchitecture
+            from openwam.model.video_backbone.wan_backbone import WanBase
+
+            if self._dit_cache is not None:
+                raise ValueError("Transformer residual reuse and velocity reuse must not be enabled together.")
+            if not isinstance(self.architecture, DualSystemSelfAttnArchitecture) or not isinstance(
+                self.architecture.video_backbone, WanBase
+            ):
+                raise ValueError("Residual reuse currently supports Wan dual-system joint self-attention only.")
+            if float(getattr(self.cfg.inference, "cfg_scale", 1.0)) != 1.0:
+                raise ValueError("Residual reuse does not support classifier-free guidance.")
+            self._residual_cache = TransformerResidualCache(
+                refresh_steps=tuple(getattr(residual_cfg, "refresh_steps", [0, 3, 6, 9])), total_steps=10
+            )
+            self.architecture._serving_residual_cache = self._residual_cache
+
+        self._prefix_cache = None
+        self.architecture._serving_prefix_cache = None
+        prefix_cfg = getattr(optimization, "observation_prefix_cache", None) if optimization else None
+        if prefix_cfg is not None and getattr(prefix_cfg, "enabled", False):
+            from openwam.deploy.optimizations.prefix_cache import ObservationPrefixCache
+            from openwam.model.architectures.dual_system.joint_self_attn import DualSystemSelfAttnArchitecture
+
+            if not isinstance(self.architecture, DualSystemSelfAttnArchitecture):
+                raise ValueError("Observation-prefix reuse currently supports dual-system joint self-attention only.")
+            if float(getattr(self.cfg.inference, "cfg_scale", 1.0)) != 1.0:
+                raise ValueError("Observation-prefix reuse does not support classifier-free guidance.")
+            self._prefix_cache = ObservationPrefixCache(
+                self.architecture,
+                compile_enabled=bool(getattr(prefix_cfg, "compile_enabled", True)),
+                compile_mode=str(getattr(prefix_cfg, "compile_mode", "reduce-overhead")),
+                verify_invariants=bool(getattr(prefix_cfg, "verify_invariants", True)),
+            )
+            self.architecture._serving_prefix_cache = self._prefix_cache
+
+        self._rope_cache = None
+        self._time_cache = None
+        self._lightweight_reuse = None
+        self.architecture._serving_time_cache = None
+        self.architecture._serving_lightweight_reuse = None
+        video_backbone = getattr(self.architecture, "video_backbone", None)
+        action_backbone = getattr(self.architecture, "action_backbone", None)
+        if video_backbone is not None:
+            video_backbone._serving_rope_cache = None
+            video_backbone._serving_time_cache = None
+        if action_backbone is not None:
+            action_backbone._serving_time_cache = None
+        rope_cfg = getattr(optimization, "rope_cache", None) if optimization else None
+        if rope_cfg is not None and getattr(rope_cfg, "enabled", False):
+            from openwam.deploy.optimizations.rope_cache import WanRoPECache
+            from openwam.model.video_backbone.wan_backbone import WanBase
+
+            if not isinstance(video_backbone, WanBase):
+                raise ValueError("Prepared RoPE caching currently supports Wan only.")
+            self._rope_cache = WanRoPECache(max_entries=1)
+            video_backbone._serving_rope_cache = self._rope_cache
+        time_cfg = getattr(optimization, "fixed_schedule_time_cache", None) if optimization else None
+        if time_cfg is not None and getattr(time_cfg, "enabled", False):
+            from openwam.deploy.optimizations.time_cache import FixedScheduleTimeCache
+            from openwam.model.architectures.dual_system.joint_self_attn import DualSystemSelfAttnArchitecture
+
+            if not isinstance(self.architecture, DualSystemSelfAttnArchitecture):
+                raise ValueError("Fixed-schedule time caching requires joint self-attention serving.")
+            self._time_cache = FixedScheduleTimeCache(self.architecture)
+            self.architecture._serving_time_cache = self._time_cache
+            video_backbone._serving_time_cache = self._time_cache
+            action_backbone._serving_time_cache = self._time_cache
+        light_cfg = getattr(optimization, "lightweight_residual_reuse", None) if optimization else None
+        if light_cfg is not None and getattr(light_cfg, "enabled", False):
+            from openwam.deploy.optimizations.lightweight_reuse import LightweightResidualReuse
+
+            if self._residual_cache is None:
+                raise ValueError("Lightweight residual reuse requires the Transformer residual cache.")
+            self._lightweight_reuse = LightweightResidualReuse(self.architecture)
+            self.architecture._serving_lightweight_reuse = self._lightweight_reuse
 
         # torch.compile — ActionDiT, Video DiT, VAE
         if optimization and getattr(optimization, "compile", None):
@@ -233,6 +316,70 @@ class JointInferenceEngine(BaseInferenceEngine):
         else:
             self._prompt_embed_cache = None
             logger.info("prompt_embed_cache disabled by config")
+
+        self.architecture._precompute_timesteps = bool(
+            getattr(optimization, "precompute_timesteps", False) if optimization else False
+        )
+        self.architecture._skip_redundant_eval = bool(
+            getattr(optimization, "skip_redundant_eval", False) if optimization else False
+        )
+        self.architecture._static_action_pinning = bool(
+            getattr(optimization, "static_action_pinning", False) if optimization else False
+        )
+        rope_mode = str(getattr(optimization, "rope_kernel", "torch") if optimization else "torch")
+        if rope_mode not in ("torch", "triton_rope", "triton_norm_rope"):
+            raise ValueError(f"Unknown rope_kernel: {rope_mode}")
+        if rope_mode != "torch":
+            from openwam.model.architectures.dual_system.joint_self_attn import DualSystemSelfAttnArchitecture
+            from openwam.model.ops.fused_norm_rope import fused_norm_rope, triton
+            from openwam.model.video_backbone.wan_backbone import WanBase
+
+            if not isinstance(self.architecture, DualSystemSelfAttnArchitecture) or not isinstance(
+                self.architecture.video_backbone, WanBase
+            ):
+                raise ValueError("RoPE kernels currently support Wan dual-system joint self-attention.")
+            if self.architecture.device.type != "cuda" or triton is None:
+                raise ValueError("Triton RoPE configuration requires CUDA and Triton.")
+            modules = [b.self_attn for b in self.architecture.video_backbone.dit.blocks] + [
+                b.self_attn for b in self.architecture.action_backbone.blocks
+            ]
+            for module in modules:
+                module._serving_rope_mode = rope_mode
+                module._serving_rope_fn = fused_norm_rope
+
+        elif callable(getattr(self.architecture, "modules", None)):
+            # Reinitializing an engine with the same model must honor rollback.
+            for module in self.architecture.modules():
+                if hasattr(module, "_serving_rope_mode"):
+                    module._serving_rope_mode = "torch"
+
+        self._conditional_kv_cache = None
+        kv_cfg = getattr(optimization, "conditional_kv_cache", None) if optimization else None
+        if kv_cfg is not None and getattr(kv_cfg, "enabled", False):
+            if float(getattr(self.cfg.inference, "cfg_scale", 1.0)) != 1.0:
+                raise ValueError("Conditional K/V reuse does not support classifier-free guidance.")
+            from openwam.deploy.optimizations.conditional_kv import ConditionalKVCache
+
+            self._conditional_kv_cache = ConditionalKVCache(
+                self.architecture,
+                compact_context=bool(getattr(kv_cfg, "compact_context", False)),
+                precompute_context=bool(getattr(kv_cfg, "precompute_context", False)),
+            )
+            self.architecture._serving_conditioning_cache = self._conditional_kv_cache
+
+        split_cfg = getattr(optimization, "split_prefix_attention", None) if optimization else None
+        if split_cfg is not None and getattr(split_cfg, "enabled", False):
+            from openwam.model.video_backbone.wan_backbone import WanBase
+
+            driver = getattr(self.architecture, "mot_driver", None)
+            if (
+                driver is None
+                or not isinstance(self.architecture.video_backbone, WanBase)
+                or driver.attention_mask_mode != "mutual"
+                or driver.vb.video_attention_mask_mode != "first_frame_causal"
+            ):
+                raise ValueError("Split attention requires Wan dual-system mutual + first-frame-causal attention.")
+            driver.split_prefix_attention = True
 
     def _init_cfg(self):
         """Resolve Classifier-Free Guidance from cfg.inference (CosmosPredict25 only; cfg_scale=1.0 is a no-op).
@@ -284,6 +431,34 @@ class JointInferenceEngine(BaseInferenceEngine):
 
         denoise_mode = conditions.get("denoise_mode", getattr(inf_cfg, "denoise_mode", "sync"))
         denoise_steps = conditions.get("denoise_steps", inf_cfg.denoise_steps)
+        prefix_cache = getattr(self, "_prefix_cache", None)
+        if prefix_cache is not None:
+            if denoise_mode != "sync" or self._cfg_scale != 1.0:
+                raise ValueError("Observation-prefix reuse requires synchronous sampling and cfg_scale=1.")
+            if getattr(self.architecture, "_serving_prefix_cache", None) is not prefix_cache:
+                raise RuntimeError("Observation-prefix cache is not bound to this architecture.")
+        residual_cache = getattr(self, "_residual_cache", None)
+        if residual_cache is not None:
+            if denoise_mode != "sync" or int(denoise_steps) != 10 or self._cfg_scale != 1.0:
+                raise ValueError("Residual reuse requires synchronous 10-step sampling and cfg_scale=1.")
+            if self._dit_cache is not None:
+                raise ValueError("Residual reuse and velocity reuse are mutually exclusive.")
+            if getattr(self.architecture, "_serving_residual_cache", None) is not residual_cache:
+                raise RuntimeError("Residual cache is not bound to this architecture.")
+        time_cache = getattr(self, "_time_cache", None)
+        if time_cache is not None:
+            if denoise_mode != "sync" or self._cfg_scale != 1.0:
+                raise ValueError("Fixed-schedule time caching requires synchronous sampling and cfg_scale=1.")
+            if any(getattr(owner, "_serving_time_cache", None) is not time_cache for owner in (
+                self.architecture, self.architecture.video_backbone, self.architecture.action_backbone
+            )):
+                raise RuntimeError("Fixed-schedule time cache is not bound to this architecture.")
+        lightweight_reuse = getattr(self, "_lightweight_reuse", None)
+        if lightweight_reuse is not None:
+            if residual_cache is None:
+                raise ValueError("Lightweight reuse requires an active residual-cache configuration.")
+            if getattr(self.architecture, "_serving_lightweight_reuse", None) is not lightweight_reuse:
+                raise RuntimeError("Lightweight reuse is not bound to this architecture.")
         lead_modality = conditions.get("lead_modality", getattr(inf_cfg, "lead_modality", "video"))
         variance_shift_alpha = conditions.get("variance_shift_alpha", getattr(inf_cfg, "variance_shift_alpha", 1.0))
         linear_offset = conditions.get("linear_offset", getattr(inf_cfg, "linear_offset", 0.0))
@@ -362,7 +537,32 @@ class JointInferenceEngine(BaseInferenceEngine):
                 "cfg_merge": self._cfg_merge,
             }
         )
-        result = self.architecture.generate(**generate_kwargs)
+        with ExitStack() as stack:
+            if time_cache is not None:
+                stack.enter_context(time_cache.generation(
+                    schedule,
+                    timestep_scales=(float(self.architecture.video_scheduler.num_train_timesteps),
+                                     float(self.architecture.action_scheduler.num_train_timesteps)),
+                    precomputed=bool(getattr(self.architecture, "_precompute_timesteps", False)),
+                ))
+            if self._conditional_kv_cache is not None:
+                stack.enter_context(self._conditional_kv_cache.generation())
+            if prefix_cache is not None:
+                stack.enter_context(prefix_cache.generation())
+            if residual_cache is not None:
+                stack.enter_context(residual_cache.generation())
+            if lightweight_reuse is not None:
+                stack.enter_context(lightweight_reuse.generation())
+            result = self.architecture.generate(**generate_kwargs)
+
+        if residual_cache is not None:
+            result["residual_cache_stats"] = dict(residual_cache.stats)
+        if prefix_cache is not None:
+            result["prefix_cache_stats"] = dict(prefix_cache.stats)
+        if time_cache is not None:
+            result["time_cache_stats"] = dict(time_cache.stats)
+        if lightweight_reuse is not None:
+            result["lightweight_reuse_stats"] = dict(lightweight_reuse.stats)
 
         # Attach optimization stats if profiling
         if self._profile and self._dit_cache is not None:

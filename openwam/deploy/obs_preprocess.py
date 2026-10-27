@@ -9,6 +9,7 @@ be unit-tested without a GPU or a live engine.
 import base64
 import io
 import logging
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
@@ -85,12 +86,20 @@ class ObsPreprocessor:
         img_height: int,
         img_width: int,
         requires_proprio: bool = False,
+        decode_workers: int = 0,
     ):
         self.multiview = bool(multiview)
         self.camera_layout = list(camera_layout)
         self.img_height = int(img_height)
         self.img_width = int(img_width)
         self.requires_proprio = bool(requires_proprio)
+        if decode_workers not in (0, 1, 2, 3):
+            raise ValueError("decode_workers must be between 0 and 3")
+        self._decode_pool = (
+            ThreadPoolExecutor(max_workers=decode_workers, thread_name_prefix="wam-image")
+            if self.multiview and decode_workers > 1
+            else None
+        )
 
     @classmethod
     def from_cfg(cls, cfg, engine=None) -> "ObsPreprocessor":
@@ -115,7 +124,13 @@ class ObsPreprocessor:
             img_height=int(_h if _h is not None else 384),
             img_width=int(_w if _w is not None else 320),
             requires_proprio=_resolve_requires_proprio(cfg, engine),
+            decode_workers=int(_cfg_select(cfg, "optimization.image_decode_workers", 0)),
         )
+
+    def shutdown(self):
+        if self._decode_pool is not None:
+            self._decode_pool.shutdown(wait=True)
+            self._decode_pool = None
 
     def preprocess(self, obs: dict) -> dict:
         """Validate + preprocess ``obs`` in place.
@@ -167,7 +182,23 @@ class ObsPreprocessor:
                 "head_camera is required in obs['images'] (got None or missing). "
                 "The head camera feed is never optional on either single-view or multi-view servers."
             )
-        head_pil = _as_pil(head_raw, ctx="images['head_camera']")
+        keys = ("head_camera", "left_wrist_camera", "right_wrist_camera")
+        encoded = [k for k in keys if isinstance(imgs.get(k), (str, bytes, bytearray))]
+        futures = {}
+        if self._decode_pool is not None and len(self.camera_layout) >= 3 and len(encoded) > 1:
+            futures = {k: self._decode_pool.submit(_as_pil, imgs[k], ctx=f"images['{k}']") for k in encoded}
+
+        def _decode_key(key):
+            raw = imgs[key]
+            ctx = f"images['{key}']"
+            try:
+                return futures[key].result() if key in futures else _as_pil(raw, ctx=ctx)
+            except Exception:
+                for future in futures.values():
+                    future.cancel()
+                raise
+
+        head_pil = _decode_key("head_camera")
 
         # --- Dispatch by server's configured view mode ---
         if not self.multiview:
@@ -181,13 +212,14 @@ class ObsPreprocessor:
                     f"got {self.camera_layout}. Check the checkpoint's config.yaml."
                 )
 
-            def _decode_or_black(raw, ctx: str) -> Image.Image:
+            def _decode_or_black(key) -> Image.Image:
+                raw = imgs.get(key)
                 if raw is None:
                     return Image.new("RGB", (self.img_width, self.img_height), (0, 0, 0))
-                return _as_pil(raw, ctx=ctx)
+                return _decode_key(key)
 
-            left_pil = _decode_or_black(imgs.get("left_wrist_camera"), ctx="images['left_wrist_camera']")
-            right_pil = _decode_or_black(imgs.get("right_wrist_camera"), ctx="images['right_wrist_camera']")
+            left_pil = _decode_or_black("left_wrist_camera")
+            right_pil = _decode_or_black("right_wrist_camera")
 
             # Map the fixed client-side keys to camera_layout positions:
             #   head_camera        -> layout[0]  (top)
@@ -203,6 +235,7 @@ class ObsPreprocessor:
                 camera_layout=self.camera_layout,
                 out_h=self.img_height,
                 out_w=self.img_width,
+                executor=self._decode_pool,
             )
 
         # --- Prompt passthrough (server is prompt-agnostic; normalize missing to "") ---

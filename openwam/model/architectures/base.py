@@ -1325,6 +1325,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         Returns a bool ``(action_dim,)`` mask of INACTIVE dims, or ``None``
         when every dim is active.
         """
+        mask_device = torch.device("cpu") if getattr(self, "_static_action_pinning", False) else device
         if active_action_mask is None:
             normalizer = getattr(self, "normalizer", None)
             active_action_indices = getattr(normalizer, "_dst_index", None)
@@ -1334,7 +1335,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
                 and unified_action_dim is not None
                 and int(unified_action_dim) == self.action_dim
             ):
-                active_action_indices = torch.as_tensor(active_action_indices, device=device, dtype=torch.long)
+                active_action_indices = torch.as_tensor(active_action_indices, device=mask_device, dtype=torch.long)
                 if active_action_indices.numel() and (
                     int(active_action_indices.min()) < 0 or int(active_action_indices.max()) >= self.action_dim
                 ):
@@ -1342,12 +1343,12 @@ class BaseWAMArchitecture(ABC, nn.Module):
                         f"Unified action indices must be within [0, {self.action_dim}); "
                         f"got {active_action_indices.tolist()}."
                     )
-                active_action_mask = torch.zeros(self.action_dim, device=device, dtype=torch.bool)
+                active_action_mask = torch.zeros(self.action_dim, device=mask_device, dtype=torch.bool)
                 active_action_mask[active_action_indices] = True
 
         if active_action_mask is None:
             return None
-        active_action_mask = torch.as_tensor(active_action_mask, device=device, dtype=torch.bool)
+        active_action_mask = torch.as_tensor(active_action_mask, device=mask_device, dtype=torch.bool)
         if active_action_mask.shape != (self.action_dim,):
             raise ValueError(
                 f"active_action_mask must have shape ({self.action_dim},); got {tuple(active_action_mask.shape)}."
@@ -1355,7 +1356,22 @@ class BaseWAMArchitecture(ABC, nn.Module):
         inactive_action_dims = ~active_action_mask
         if not bool(inactive_action_dims.any()):
             return None
-        return inactive_action_dims
+        return inactive_action_dims.to(device=device)
+
+    def _ensure_eval_for_generation(self):
+        """Avoid repeated mode assignments while retaining custom train semantics."""
+        if not getattr(self, "_skip_redundant_eval", False):
+            self.eval()
+            return
+        if (
+            type(self).eval is not nn.Module.eval
+            or "eval" in self.__dict__
+            or any(
+                module.training or type(module).train is not nn.Module.train or "train" in module.__dict__
+                for module in self.modules()
+            )
+        ):
+            self.eval()
 
     @torch.no_grad()
     def generate(
@@ -1417,7 +1433,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         # invoke `generate()` without going through that path. Idempotent
         # — guards CFG dropout (e.g. CosmosPredict25 §14.7) and any other
         # training-only behavior from firing during inference.
-        self.eval()
+        self._ensure_eval_for_generation()
 
         vb = self.video_backbone
         device = self.device
@@ -1499,15 +1515,24 @@ class BaseWAMArchitecture(ABC, nn.Module):
         # so their predicted flow is unconstrained.  Keep those dimensions on the
         # analytic forward-noise path instead of feeding unconstrained updates back
         # into the next denoising step.
+        static_action_pinning = bool(getattr(self, "_static_action_pinning", False))
         inactive_action_noise = None
         inactive_action_dims = self._resolve_inactive_action_dims(active_action_mask, device)
 
         num_train_ts_v = float(self.video_scheduler.num_train_timesteps)
         num_train_ts_a = float(self.action_scheduler.num_train_timesteps)
 
+        step_timesteps = None
+        if getattr(self, "_precompute_timesteps", False):
+            # One H2D copy instead of two synchronizing scalar constructions
+            # per step. Views preserve the original one-element tensor shape.
+            step_timesteps = torch.as_tensor(schedule[:-1], dtype=dtype, device=device).reshape(-1, 2)
         t_loop = time.time()
+        serving_time_cache = getattr(self, "_serving_time_cache", None)
 
         for i in tqdm(range(len(schedule) - 1), desc="Joint denoising"):
+            if serving_time_cache is not None and serving_time_cache.active:
+                serving_time_cache.set_step(i)
             t_v, t_a = schedule[i]
             t_v_next, t_a_next = schedule[i + 1]
 
@@ -1526,8 +1551,12 @@ class BaseWAMArchitecture(ABC, nn.Module):
             # the forward context: under a v→a-visible attention mask, dropping
             # its tokens would change the other stream's prediction. Freezing
             # only gates the *update* below, never the forward inputs.
-            v_timestep = torch.tensor([t_v], dtype=dtype, device=device)
-            a_timestep = torch.tensor([t_a], dtype=dtype, device=device)
+            if step_timesteps is None:
+                v_timestep = torch.tensor([t_v], dtype=dtype, device=device)
+                a_timestep = torch.tensor([t_a], dtype=dtype, device=device)
+            else:
+                v_timestep = step_timesteps[i, :1]
+                a_timestep = step_timesteps[i, 1:]
 
             if (
                 dit_cache is not None
@@ -1575,12 +1604,24 @@ class BaseWAMArchitecture(ABC, nn.Module):
                     sigma_a_f = float(sigma_a)
                     if sigma_a_f <= 0.0:
                         raise ValueError("Cannot initialize inactive action noise from a non-positive sigma.")
-                    inactive_action_noise = action_latents[..., inactive_action_dims].detach().clone() / sigma_a_f
+                    if static_action_pinning:
+                        # Keep the shape fixed: boolean advanced indexing calls
+                        # nonzero and synchronizes CUDA on every denoising step.
+                        inactive_action_noise = action_latents.detach().clone() / sigma_a_f
+                    else:
+                        inactive_action_noise = action_latents[..., inactive_action_dims].detach().clone() / sigma_a_f
                 action_latents = self.action_scheduler.flow_step(
                     action_noise_pred, sigma_a, sigma_a_next, action_latents
                 )
                 if inactive_action_dims is not None:
-                    action_latents[..., inactive_action_dims] = inactive_action_noise * float(sigma_a_next)
+                    if static_action_pinning:
+                        action_latents = torch.where(
+                            inactive_action_dims,
+                            inactive_action_noise * float(sigma_a_next),
+                            action_latents,
+                        )
+                    else:
+                        action_latents[..., inactive_action_dims] = inactive_action_noise * float(sigma_a_next)
 
         if profile:
             if torch.cuda.is_available():
